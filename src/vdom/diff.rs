@@ -496,6 +496,59 @@ mod tests {
     }
 
     #[test]
+    fn prepended_unkeyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div()
+            .child(p())
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div()
+            .child(div())
+            .child(div())
+            .child(p())
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(
+                None,
+                Some(vec![Replace(&div().done())]),
+                Some(vec![(1, &div().done()), (2, &p().done())])
+            )
+        )
+    }
+
+    #[test]
+    fn inserted_unkeyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div()
+            .child(p())
+            .child(p())
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div()
+            .child(p())
+            .child(div())
+            .child(p())
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(
+                None,
+                Some(vec![Skip(1), Replace(&div().done())]),
+                Some(vec![(2, &p().done())])
+            )
+        )
+    }
+
+    #[test]
     fn appended_unkeyed_children() {
         #[cfg_attr(rustfmt, rustfmt_skip)]
         let old = div()
@@ -505,15 +558,58 @@ mod tests {
         #[cfg_attr(rustfmt, rustfmt_skip)]
         let new = div()
             .child(p())
-            .child(p())
-            .child(p())
+            .child(div())
+            .child(div())
             .done();
 
         let result = diff(&old, &new);
 
         assert_eq!(
             result,
-            Update(None, None, Some(vec![(1, &p().done()), (2, &p().done())]))
+            Update(
+                None,
+                None,
+                Some(vec![(1, &div().done()), (2, &div().done())])
+            )
         )
+    }
+
+    #[test]
+    fn inserted_and_modified_unkeyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div()
+            .child(div()
+                .child(p())
+                .child(p())
+            )
+            .child(div()
+                .child(div())
+            )
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div()
+            .child(div()
+                .child(p())
+                .child(p())
+                .child(p())
+            )
+            .child(p().text("Hello"))
+            .child(div())
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(
+                None,
+                Some(vec![
+                    Update(None, None, Some(vec![(2, &p().done())])),
+                    Replace(&p().text("Hello").done()),
+                ]),
+                Some(vec![(2, &div().done())])
+            )
+        );
     }
 }
