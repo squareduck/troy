@@ -1,7 +1,69 @@
+//! # VNode diffing
+//!
+//! ## Target output
+//!
+//! Output of the diff function is a tree structure which describes necessary
+//! transformations for each node in the old VNode tree.
+//!
+//! If VNode has children and they were updated, diff will contain an operation
+//! for each old child, and possibly new inserts.
+//!
+//! Each child must have an operation associated with it by the same index if
+//! a node with children is to be updated.
+//!
+//! Some operations are reducible if they occur in sequence. For example if
+//! there are several Skip(1) in a row, we can reduce them to single Skip(3).
+//! It still signifies skipping three children, but takes less space.
+//!
+//! Position parameters (such as in Move or Insert operations) refer to
+//! positon in the new children list.
+//!
+//! For example, for a change such as:
+//! ```html
+//!
+//! Old:
+//!
+//! <div class="users">
+//!     <p key="1" class="online">Ash</p>
+//!     <p key="2" class="online">Bob</p>
+//!     <p key="3" class="offline">Cid</p>
+//!     <p key="4" class="offline">Dan</p>
+//!     <p key="5" class="offline">Ela</p>
+//! </div>
+//!
+//! New:
+//!
+//! <div class="users">
+//!     <p key="1" class="online message">Ash</p>
+//!     <p key="3" class="online">Cid</p>
+//!     <p key="4" class="online">Dan</p>
+//!     <p key="2" class="offline">Bobby</p>
+//!     <p key="6" class="offline">Fiz</p>
+//! </div>
+//! ```
+//!
+//! We should get the following diff:
+//! ```text
+//! Update(
+//!     None,
+//!     Some(vec![
+//!         Update(Some(vec![InsertClass("message")]), None, None),
+//!         Move(3, None, Some(vec![Replace(VText("Bobby"))]), None),
+//!         Update(Some(vec![RemoveClass("offline"), InsertClass("online")]), None, None)
+//!         Update(Some(vec![RemoveClass("offline"), InsertClass("online")]), None, None)
+//!         Remove(1),
+//!     ]),
+//!     Some(vec![
+//!         (4, &p().class("offline").text("Fiz")),
+//!     ])
+//! )
+//!
 use std::collections::{HashMap, HashSet};
+use utils::lis::lis;
 use utils::op_queue::OpQueue;
 use vdom::element::VElement;
 use vdom::node::VNode;
+use vdom::types::CowString;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum AttrOp {
@@ -14,628 +76,444 @@ pub enum AttrOp {
 
 pub type AttrDiff = Option<Vec<AttrOp>>;
 pub type ChildDiff<'new> = Option<Vec<NodeOp<'new>>>;
+pub type ChildInsert<'new> = (usize, &'new VNode);
+pub type ChildInserts<'new> = Option<Vec<ChildInsert<'new>>>;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum NodeOp<'new> {
     Skip(usize),
     Remove(usize),
-    Insert(usize, &'new VNode),
-    Update(AttrDiff, ChildDiff<'new>),
+    Move(usize, AttrDiff, ChildDiff<'new>, ChildInserts<'new>),
+    Update(AttrDiff, ChildDiff<'new>, ChildInserts<'new>),
     Replace(&'new VNode),
 }
 
-// Find the optimal way to transform `old` VNode into `new` VNode.
-//
-// Returns a tree of `NodeOp`s describing the transformation.
-//
-// # Steps
-//
-// 1. If VNodes are of different types, return `Replace(new)`.
-// 2. If VNodes are both `Element`:
-//     2.a If tags are different, return `Replace(new)`.
-//     2.b Diff attributes
-//     2.c Diff children
-//     2.d If attributes and/or children are different,
-//         return `Update(attr, children)`.
-//         If not - return `Skip(1)`.
-//
-// 3. Otherwise, return `Replace(new)`.
-//
 pub fn diff<'new>(old: &VNode, new: &'new VNode) -> NodeOp<'new> {
-    use vdom::node::VNode::Element;
+    use self::NodeOp::*;
+    use vdom::node::VNode::*;
 
     match (old, new) {
         (Element(old_element), Element(new_element)) => {
+            // Elements with different tags produce Replace.
             if old_element.get_tag() != new_element.get_tag() {
-                NodeOp::Replace(new)
+                Replace(&new)
+            // Elements with different keys produce Replace.
+            } else if old_element.get_key() != new_element.get_key() {
+                Replace(&new)
+            // Diff attributes and children lists.
             } else {
                 let attr_diff = diff_attributes(old_element, new_element);
-                let children_diff = diff_children(old_element, new_element);
-
-                match (attr_diff, children_diff) {
-                    (None, None) => NodeOp::Skip(1),
-                    (attr, children) => NodeOp::Update(attr, children),
+                // TODO: Diff children.
+                let (children_diff, children_inserts) = diff_children(old_element, new_element);
+                // Check if either of attr and children diffs returned Some.
+                match (attr_diff, children_diff, children_inserts) {
+                    // No diffs produce Skip.
+                    (None, None, None) => Skip(1),
+                    // Any diff produces Update.
+                    (attr, children, inserts) => Update(attr, children, inserts),
                 }
             }
         }
-        _ => NodeOp::Replace(new),
+        // VNodes of different type produce Replace
+        _ => Replace(&new),
     }
 }
 
 fn diff_attributes(old: &VElement, new: &VElement) -> AttrDiff {
-    let mut diff: Vec<AttrOp> = Vec::new();
+    use self::AttrOp::*;
 
-    // Diff classes
-    //
+    // Find removed and inserted classes
 
     let old_classes = old.get_classes();
     let new_classes = new.get_classes();
 
-    let remove_classes = old_classes
-        .difference(new_classes)
-        .map(|class| AttrOp::RemoveClass(class.to_string()));
+    let remove_classes: Vec<AttrOp> = old_classes
+        .difference(&new_classes)
+        .map(|c| RemoveClass(c.clone().into_owned()))
+        .collect();
+    let insert_classes: Vec<AttrOp> = new_classes
+        .difference(&old_classes)
+        .map(|c| InsertClass(c.clone().into_owned()))
+        .collect();
 
-    let insert_classes = new_classes
-        .difference(old_classes)
-        .map(|class| AttrOp::InsertClass(class.to_string()));
+    let mut attr_diff: Vec<AttrOp> = vec![];
 
-    diff.extend(remove_classes);
-    diff.extend(insert_classes);
+    attr_diff.extend(remove_classes);
+    attr_diff.extend(insert_classes);
 
-    // Diff other attributes
-    //
+    // Find removed, updated, or inserted attributes
 
     let old_attributes = old.get_attributes();
     let new_attributes = new.get_attributes();
 
-    let mut keys: HashSet<&String> = old_attributes.keys().collect();
+    let mut keys: HashSet<&CowString> = old_attributes.keys().collect();
     keys.extend(new_attributes.keys());
 
     for key in keys {
         match (old_attributes.get(key), new_attributes.get(key)) {
-            (Some(_), None) => diff.push(AttrOp::Remove(key.to_string())),
-            (None, Some(value)) => diff.push(AttrOp::Insert(key.to_string(), value.to_string())),
+            (Some(_), None) => attr_diff.push(AttrOp::Remove(key.clone().into_owned())),
+            (None, Some(value)) => attr_diff.push(AttrOp::Insert(
+                key.clone().into_owned(),
+                value.clone().into_owned(),
+            )),
             (Some(old_value), Some(new_value)) => {
                 if old_value != new_value {
-                    diff.push(AttrOp::Update(key.to_string(), new_value.to_string()))
+                    attr_diff.push(AttrOp::Update(
+                        key.clone().into_owned(),
+                        new_value.clone().into_owned(),
+                    ))
                 }
             }
             (None, None) => {}
         }
     }
 
-    if diff.len() > 0 {
-        Some(diff)
+    // Return result
+
+    if attr_diff.len() > 0 {
+        Some(attr_diff)
     } else {
         None
     }
 }
 
-fn diff_children<'new>(old: &VElement, new: &'new VElement) -> ChildDiff<'new> {
+fn diff_children<'new>(
+    old: &VElement,
+    new: &'new VElement,
+) -> (ChildDiff<'new>, ChildInserts<'new>) {
+    use self::NodeOp::*;
+
     let old_children = old.get_children();
     let new_children = new.get_children();
 
-    // Find common prefix
-    //
+    match (old_children.len(), new_children.len()) {
+        // Both children lists are empty, no diff and no inserts.
+        (0, 0) => (None, None),
+        // Old children list is not empty, add Remove for each old child.
+        (old_len, 0) => (Some(vec![Remove(old_len)]), None),
+        // New children list is not empty, add Insert for each new child.
+        (0, _) => (None, Some(new_children.iter().enumerate().collect())),
+        // Both children lists are not empty
+        (old_len, new_len) => {
+            let mut op_queue = OpQueue::new();
+            let mut inserts: Vec<ChildInsert> = Vec::new();
 
-    let old_children_len = old_children.len();
-    let new_children_len = new_children.len();
+            // Find common prefix length
+            let max_prefix_len = old_len.min(new_len);
+            let mut prefix_len = 0;
+            for i in 0..max_prefix_len {
+                // For unkeyed children this is always true
+                if old_children[i].key() == new_children[i].key() {
+                    prefix_len += 1;
+                }
+            }
 
-    // If no children return None right away
-    if old_children_len == 0 && new_children_len == 0 {
-        return None;
-    }
+            // Find common suffix length
+            let max_suffix_len = max_prefix_len - prefix_len;
+            let mut suffix_len = 0;
+            for i in (0..max_suffix_len).rev() {
+                if old_children[i].key() == new_children[i].key() {
+                    suffix_len += 1;
+                }
+            }
+            // Calculate middle length for both lists
+            let old_middle_len = old_len - (prefix_len + suffix_len);
+            let new_middle_len = new_len - (prefix_len + suffix_len);
 
-    let min_len = old_children_len.min(new_children_len);
-    let mut prefix_len = 0;
+            // Push operations for common prefix
+            for i in 0..prefix_len {
+                op_queue.push(diff(&old_children[i], &new_children[i]));
+            }
 
-    // Find prefix length
-    for index in 0..min_len {
-        // Unkeyed elements are treated as having the same key.
-        let old_key = old_children[index].get_key();
-        let new_key = new_children[index].get_key();
-        if old_children[index].get_key() == new_children[index].get_key() {
-            prefix_len += 1;
-        } else {
-            break;
-        }
-    }
+            // Push operations for middle
+            match (old_middle_len, new_middle_len) {
+                // Both middles are empty, do nothing
+                (0, 0) => {}
+                // New middle is empty, add Remove for each old middle child
+                (old_middle_len, 0) => op_queue.push(Remove(old_middle_len)),
+                // Old middle is empty, add Insert for each new middle child
+                (0, new_middle_len) => {
+                    for i in prefix_len..(prefix_len + new_middle_len) {
+                        inserts.push((i, &new_children[i]));
+                    }
+                }
+                // TODO: Collecting references to VNodes can be suboptimal if
+                // the middle is big.
+                //
+                // Maybe send refenece to old and new children, and ranges?
+                //
+                (old_middle_len, new_middle_len) => {
+                    let old_middle_children: Vec<&VNode> = old_children
+                        [prefix_len..(prefix_len + old_middle_len)]
+                        .iter()
+                        .collect();
 
-    // Generate prefix ops
-    let mut prefix_queue = OpQueue::new();
-    for index in 0..prefix_len {
-        prefix_queue.push(diff(&old_children[index], &new_children[index]));
-    }
-    let prefix_ops = prefix_queue.done();
+                    let new_middle_children: Vec<&VNode> = new_children
+                        [prefix_len..(prefix_len + new_middle_len)]
+                        .iter()
+                        .collect();
 
-    // Find suffix length
-    let possible_suffix_len = min_len - prefix_len;
-    let mut suffix_len = 0;
-    for index in 0..possible_suffix_len {
-        if old_children[old_children_len - index - 1].get_key()
-            == new_children[new_children_len - index - 1].get_key()
-        {
-            suffix_len += 1;
-        }
-    }
+                    diff_middles(
+                        &mut op_queue,
+                        &mut inserts,
+                        old_middle_children,
+                        new_middle_children,
+                    );
+                }
+            };
 
-    // Generate suffix ops
-    // TODO: Get rid of reverse()
-    let mut suffix_queue = OpQueue::new();
-    for index in 0..suffix_len {
-        suffix_queue.push(diff(&old_children[index], &new_children[index]));
-    }
-    let suffix_ops = suffix_queue.done_reverse();
+            // Push operations for common suffix
+            let old_suffix_start = old_len - suffix_len;
+            let new_suffix_start = new_len - suffix_len;
 
-    // Find middle length
-    let old_middle_len = old_children_len - prefix_len - suffix_len;
-    let new_middle_len = new_children_len - prefix_len - suffix_len;
+            for i in 0..suffix_len {
+                op_queue.push(diff(
+                    &old_children[old_suffix_start + i],
+                    &new_children[new_suffix_start + i],
+                ));
+            }
 
-    // Check if one or both of the middles is empty
-    // If it is - we can finish here by populating middle ops with
-    // Removes or Inserts
+            // Extract operations and generate final results
+            let mut ops = op_queue.remove_single_skip().done();
 
-    let mut middle_queue = OpQueue::new();
-
-    match (old_middle_len, new_middle_len) {
-        // Both middles are empty, do nothing
-        (0, 0) => {}
-        // Old middle is not empty, remove old nodes
-        (_, 0) => middle_queue.push(NodeOp::Remove(old_middle_len)),
-        // New middle is not empty, insert new nodes
-        (0, _) => {
-            let mut index = 0;
-            for child in new_children[prefix_len..(prefix_len + new_middle_len)].iter() {
-                middle_queue.push(NodeOp::Insert(prefix_len + index, child));
-                index += 1;
+            match (ops.len(), inserts.len()) {
+                (0, 0) => (None, None),
+                (0, _) => (None, Some(inserts)),
+                (_, 0) => (Some(ops), None),
+                (_, _) => (Some(ops), Some(inserts)),
             }
         }
-        // Both middles are not empty, find operation sequece for them
-        _ => {
-            let old_middle_children: Vec<&VNode> = old_children
-                [prefix_len..(prefix_len + old_middle_len)]
-                .iter()
-                .collect();
-            let new_middle_children: Vec<&VNode> = new_children
-                [prefix_len..(prefix_len + new_middle_len)]
-                .iter()
-                .collect();
-            diff_middle_children(
-                &mut middle_queue,
-                prefix_len,
-                old_middle_children,
-                new_middle_children,
-            );
-        }
-    }
-    let middle_ops = middle_queue.done();
-
-    // Decide if children are different
-    fn skip_or_empty(ops: &Vec<NodeOp>) -> bool {
-        match ops.as_slice() {
-            [NodeOp::Skip(_)] => true,
-            [] => true,
-            _ => false,
-        }
-    }
-
-    if prefix_ops.len() + suffix_ops.len() + middle_ops.len() > 0 {
-        let prefix_skip = skip_or_empty(&prefix_ops);
-        let middle_skip = skip_or_empty(&middle_ops);
-        let suffix_skip = skip_or_empty(&suffix_ops);
-
-        if prefix_skip && middle_skip && suffix_skip {
-            None
-        } else {
-            let mut ops: Vec<NodeOp> = Vec::new();
-            ops.extend(prefix_ops);
-            ops.extend(middle_ops);
-            ops.extend(suffix_ops);
-            Some(ops)
-        }
-    } else {
-        None
     }
 }
 
-// Search for inserted, replaced and moved nodes between two lists of children.
-//
-// Inspired by:
-// https://github.com/localvoid/ivi/
-//
-// Nodes without keys are treated as unique and are always replaced.
-fn diff_middle_children<'new>(
-    queue: &mut OpQueue<'new>,
-    offset: usize,
+// TODO: Implement middle children reconciliation
+fn diff_middles(
+    op_queue: &mut OpQueue,
+    inserts: &mut Vec<ChildInsert>,
     old_children: Vec<&VNode>,
-    new_children: Vec<&'new VNode>,
+    new_children: Vec<&VNode>,
 ) {
-    // Create positions array with length of new children list. It will hold
-    // position of each new child in old children list.
-    //
-    // By default we assume new child is not in old children list, so we fill
-    // the array with None.
-    let mut positions: Vec<Option<usize>> = vec![None; new_children.len()];
-
-    // Create a list of predicted inserts
-    let mut predicted_inserts: Vec<NodeOp<'new>> = vec![];
-
-    // Create map between new children keys and their position in the list.
-    let mut new_children_map: HashMap<&str, usize> = HashMap::new();
-    for (index, child) in new_children.iter().enumerate() {
-        if let Some(key) = child.get_key() {
-            new_children_map.insert(key, index);
-        // If key is not set we assume that child is new and predict that it
-        // is going to be inserted.
-        } else {
-            //predicted_inserts.push(NodeOp::Insert(index, child));
-        }
-    }
-
-    // Create a list of predicted operations for old children.
-    // Operation refers to the old child with the same index.
-    let mut predicted_ops: Vec<NodeOp<'new>> = vec![NodeOp::Skip(1); old_children.len()];
-
-    // Iterate over old children list and for each child try to find a node
-    // with the same key in new_children_map.
-    // Remember last seen position in the new children list.
-    // If current position is larger than last position - we set `moved`
-    // to `true`.
-    let mut last_position: Option<usize> = None;
-    let mut moved = false;
-    let mut removed_keys: usize = 0;
-    for (index, child) in old_children.iter().enumerate() {
-        if let Some(key) = child.get_key() {
-            // If the old child is found in new_children_map we put the old
-            // position into positions array.
-            if let Some(position_index) = new_children_map.get(key) {
-                // Toggle `moved` flag if current position is larger than last.
-                if let Some(last_position) = last_position {
-                    if last_position > *position_index {
-                        moved = true;
-                    }
-                }
-                last_position = Some(*position_index);
-                positions[*position_index] = Some(index);
-            // If the old child is not found in new_children_map we predict it
-            // is going to be removed.
-            } else {
-                predicted_ops[index] = NodeOp::Remove(1);
-                removed_keys += 1;
-            }
-
-        // If key is not set we assume the child is going to be removed.
-        } else {
-            //predicted_ops[index] = NodeOp::Remove(1);
-        }
-    }
-
-    // If all old children are to be removed, add an insert for each new child.
-    if !moved && old_children.len() == removed_keys {
-        for (index, child) in new_children.iter().enumerate() {
-            predicted_inserts.push(NodeOp::Insert(offset + index, child))
-        }
-    }
-
-    // TODO: Check moved flag and sizes and decide if we can finish
-    // or need to continue
-
-    // Build a queue from predictions
-    for op in predicted_ops {
-        queue.push(op);
-    }
-
-    for op in predicted_inserts {
-        queue.push(op);
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::NodeOp::*;
     use super::*;
     use vdom::element::{div, p};
     use vdom::text::text;
 
     //
-    // Basic node diffing
+    // # Comparing types and tags
     //
 
     #[test]
-    fn different_types() {
+    fn different_vnode_types() {
         let old = div().done();
         let new = text("").done();
 
         let result = diff(&old, &new);
 
-        assert_eq!(result, NodeOp::Replace(&new));
+        assert_eq!(result, Replace(&new));
     }
 
     #[test]
-    fn different_tags() {
+    fn different_velement_tags() {
         let old = div().done();
         let new = p().done();
 
         let result = diff(&old, &new);
 
-        assert_eq!(result, NodeOp::Replace(&new));
+        assert_eq!(result, Replace(&new));
     }
 
     #[test]
-    fn toggled_class() {
-        let old = div().class("user").class("offline").done();
-        let new = div().class("user").class("online").done();
+    fn same_tags() {
+        let old = div().done();
+        let new = div().done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(result, Skip(1));
+    }
+
+    //
+    // # Comparing attributes
+    //
+
+    #[test]
+    fn same_tags_with_different_keys() {
+        let old = div().key("a").done();
+        let new = div().key("b").done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(result, Replace(&new));
+    }
+
+    #[test]
+    fn same_tags_with_same_classes() {
+        let old = div().class_list("aaa bbb").done();
+        let new = div().class_list("aaa bbb").done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(result, Skip(1));
+    }
+
+    #[test]
+    fn same_tags_with_different_classes() {
+        let old = div().class_list("aaa bbb").done();
+        let new = div().class_list("bbb ccc").done();
 
         let result = diff(&old, &new);
 
         assert_eq!(
             result,
-            NodeOp::Update(
+            Update(
                 Some(vec![
-                    AttrOp::RemoveClass("offline".to_string()),
-                    AttrOp::InsertClass("online".to_string()),
+                    AttrOp::RemoveClass("aaa".to_string()),
+                    AttrOp::InsertClass("ccc".to_string()),
                 ]),
+                None,
                 None
             )
-        )
+        );
     }
 
     #[test]
-    fn updated_attributes() {
-        let old = div().attr("hidden", "").attr("id", "1").done();
+    fn same_tags_with_same_attributes() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div()
+            .attr("attr_a", "aaa")
+            .attr("attr_b", "bbb")
+            .done();
 
-        let new = div().attr("data-user", "username").attr("id", "2").done();
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div()
+            .attr("attr_a", "aaa")
+            .attr("attr_b", "bbb")
+            .done();
 
         let result = diff(&old, &new);
 
-        // Need to sort because otherwise order is not guaranteed.
-        //
-        if let NodeOp::Update(Some(mut ops), _) = result {
-            ops.sort();
-            assert_eq!(
-                ops,
-                vec![
-                    AttrOp::Insert("data-user".to_string(), "username".to_string()),
-                    AttrOp::Update("id".to_string(), "2".to_string()),
-                    AttrOp::Remove("hidden".to_string()),
-                ]
-            )
+        assert_eq!(result, Skip(1));
+    }
+
+    #[test]
+    fn same_tags_with_different_attributes() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div()
+            .attr("attr_a", "aaa")
+            .attr("attr_b", "bbb")
+            .attr("attr_c", "ccc")
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div()
+            .attr("attr_b", "bbb")
+            .attr("attr_c", "***")
+            .attr("attr_d", "ddd")
+            .done();
+
+        let result = diff(&old, &new);
+
+        if let Update(Some(attr_diff), None, None) = result {
+            assert_eq!(attr_diff.len(), 3);
+            assert!(attr_diff.contains(&AttrOp::Remove("attr_a".to_string())));
+            assert!(attr_diff.contains(&AttrOp::Update("attr_c".to_string(), "***".to_string())));
+            assert!(attr_diff.contains(&AttrOp::Insert("attr_d".to_string(), "ddd".to_string())));
         } else {
-            panic!("Got no ops");
+            panic!("No attribute diff.")
         }
     }
 
     //
-    // # Children reconciliation
+    // # Comparing unkeyed children
     //
 
     #[test]
     fn same_unkeyed_children() {
         #[cfg_attr(rustfmt, rustfmt_skip)]
-        let old = div().key("p1")
+        let old = div()
             .child(p())
-            .child(p())
-            .done();
-
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        let new = div().key("p1")
             .child(p())
             .child(p())
             .done();
 
-        let result = diff(&old, &new);
-
-        assert_eq!(result, NodeOp::Skip(1));
-    }
-
-    fn different_unkeyed_children() {
         #[cfg_attr(rustfmt, rustfmt_skip)]
-        let old = div().key("p1")
-            .child(p())
-            .child(div())
-            .done();
-
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        let new = div().key("p1")
-            .child(div())
-            .child(p())
-            .done();
-
-        let result = diff(&old, &new);
-
-        assert_eq!(
-            result,
-            NodeOp::Update(
-                None,
-                Some(vec![
-                    NodeOp::Replace(&div().done()),
-                    NodeOp::Replace(&p().done()),
-                ])
-            )
-        );
-    }
-
-    #[test]
-    fn same_keyed_children() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        let old = div().key("p1")
-            .child(p().key("c1"))
-            .child(p().key("c2"))
-            .done();
-
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        let new = div().key("p1")
-            .child(p().key("c1"))
-            .child(p().key("c2"))
-            .done();
-
-        let result = diff(&old, &new);
-
-        assert_eq!(result, NodeOp::Skip(1));
-    }
-
-    #[test]
-    fn different_keyed_children() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        let old = div().key("p1")
-            .child(p().key("c1"))
-            .child(p().key("c2"))
-            .done();
-
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        let new = div().key("p1")
-            .child(p().key("c3"))
-            .child(p().key("c4"))
-            .done();
-
-        let result = diff(&old, &new);
-
-        assert_eq!(
-            result,
-            NodeOp::Update(
-                None,
-                Some(vec![
-                    NodeOp::Remove(2),
-                    NodeOp::Insert(0, &p().key("c3").done()),
-                    NodeOp::Insert(1, &p().key("c4").done()),
-                ])
-            )
-        );
-    }
-
-    #[test]
-    fn different_middle_keyed_children() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        let old = div().key("p1")
-            .child(p().key("c1"))
-            .child(p().key("c2"))
-            .child(p().key("c3"))
-            .child(p().key("c4"))
-            .child(p().key("c5"))
-            .done();
-
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        let new = div().key("p1")
-            .child(p().key("c1"))
-            .child(p().key("c2"))
-            .child(p().key("d1"))
-            .child(p().key("d2"))
-            .child(p().key("c5"))
-            .done();
-
-        let result = diff(&old, &new);
-
-        assert_eq!(
-            result,
-            NodeOp::Update(
-                None,
-                Some(vec![
-                    NodeOp::Skip(2),
-                    NodeOp::Remove(2),
-                    NodeOp::Insert(2, &p().key("d1").done()),
-                    NodeOp::Insert(3, &p().key("d2").done()),
-                    NodeOp::Skip(1),
-                ])
-            )
-        );
-    }
-
-    #[test]
-    fn prepended_keyed_children() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        let old = div().key("p1")
-            .child(p().key("c1"))
-            .child(p().key("c2"))
-            .done();
-
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        let new = div().key("p1")
-            .child(p().key("c3"))
-            .child(p().key("c4"))
-            .child(p().key("c5"))
-            .child(p().key("c1"))
-            .child(p().key("c2"))
-            .done();
-
-        let result = diff(&old, &new);
-
-        assert_eq!(
-            result,
-            NodeOp::Update(
-                None,
-                Some(vec![
-                    NodeOp::Insert(0, &p().key("c3").done()),
-                    NodeOp::Insert(1, &p().key("c4").done()),
-                    NodeOp::Insert(2, &p().key("c5").done()),
-                    NodeOp::Skip(2),
-                ])
-            )
-        );
-    }
-
-    #[test]
-    fn inserted_keyed_children() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        let old = div().key("p1")
-            .child(p().key("c1"))
-            .child(p().key("c2"))
-            .child(p().key("c5"))
-            .done();
-
         let new = div()
-            .key("p1")
-            .child(p().key("c1"))
-            .child(p().key("c2"))
-            .child(p().key("c3"))
-            .child(p().key("c4"))
-            .child(p().key("c5"))
+            .child(p())
+            .child(p())
+            .child(p())
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(result, Skip(1));
+    }
+
+    #[test]
+    fn inserted_all_unkeyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div()
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div()
+            .child(p())
+            .child(p())
+            .child(p())
             .done();
 
         let result = diff(&old, &new);
 
         assert_eq!(
             result,
-            NodeOp::Update(
+            Update(
                 None,
-                Some(vec![
-                    NodeOp::Skip(2),
-                    NodeOp::Insert(2, &p().key("c3").done()),
-                    NodeOp::Insert(3, &p().key("c4").done()),
-                    NodeOp::Skip(1),
-                ])
+                None,
+                Some(vec![(0, &p().done()), (1, &p().done()), (2, &p().done())])
             )
         );
     }
 
     #[test]
-    fn appended_keyed_children() {
+    fn removed_all_unkeyed_children() {
         #[cfg_attr(rustfmt, rustfmt_skip)]
-        let old = div().key("p1")
-            .child(p().key("c1"))
-            .child(p().key("c2"))
+        let old = div()
+            .child(p())
+            .child(p())
+            .child(p())
             .done();
 
+        #[cfg_attr(rustfmt, rustfmt_skip)]
         let new = div()
-            .key("p1")
-            .child(p().key("c1"))
-            .child(p().key("c2"))
-            .child(p().key("c3"))
-            .child(p().key("c4"))
-            .child(p().key("c5"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(result, Update(None, Some(vec![Remove(3)]), None));
+    }
+
+    #[test]
+    fn appended_unkeyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div()
+            .child(p())
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div()
+            .child(p())
+            .child(p())
+            .child(p())
             .done();
 
         let result = diff(&old, &new);
 
         assert_eq!(
             result,
-            NodeOp::Update(
-                None,
-                Some(vec![
-                    NodeOp::Skip(2),
-                    NodeOp::Insert(2, &p().key("c3").done()),
-                    NodeOp::Insert(3, &p().key("c4").done()),
-                    NodeOp::Insert(4, &p().key("c5").done()),
-                ])
-            )
-        );
+            Update(None, None, Some(vec![(1, &p().done()), (2, &p().done())]))
+        )
     }
 }

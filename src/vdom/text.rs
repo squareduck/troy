@@ -1,9 +1,11 @@
 use std::borrow::Cow;
 use vdom::node::VNode;
 
+type CowString = Cow<'static, str>;
+
 #[derive(Debug, PartialEq)]
 pub struct VText {
-    content: Cow<'static, str>,
+    content: CowString,
 }
 
 impl VText {

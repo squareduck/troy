@@ -1,5 +1,7 @@
+use std::borrow::Cow;
 use vdom::element::VElement;
 use vdom::text::VText;
+use vdom::types::CowString;
 
 #[derive(Debug, PartialEq)]
 pub enum VNode {
@@ -8,7 +10,7 @@ pub enum VNode {
 }
 
 impl VNode {
-    pub fn get_key(&self) -> Option<&str> {
+    pub fn key(&self) -> Option<&CowString> {
         match self {
             VNode::Element(element) => element.get_key(),
             _ => None,

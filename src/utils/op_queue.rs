@@ -73,6 +73,17 @@ impl<'new> OpQueue<'new> {
         };
     }
 
+    pub fn remove_single_skip(mut self) -> Self {
+        match (self.queue.len(), &self.last) {
+            (0, LastOp::Skip(_)) => {
+                self.last = LastOp::None;
+            }
+            _ => {}
+        }
+
+        self
+    }
+
     pub fn done(mut self) -> Vec<NodeOp<'new>> {
         use vdom::diff::NodeOp::*;
 
@@ -162,5 +173,18 @@ mod tests {
                 Skip(4),
             ]
         );
+    }
+
+    #[test]
+    fn removing_single_skip() {
+        let mut queue = OpQueue::new();
+        queue.push(Skip(5));
+        queue.push(Skip(2));
+        assert_eq!(queue.remove_single_skip().done(), vec![]);
+
+        let mut queue = OpQueue::new();
+        queue.push(Skip(5));
+        queue.push(Remove(4));
+        assert_eq!(queue.remove_single_skip().done(), vec![Skip(5), Remove(4)]);
     }
 }

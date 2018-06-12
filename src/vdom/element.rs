@@ -2,14 +2,15 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use vdom::node::VNode;
 use vdom::text::VText;
+use vdom::types::CowString;
 
-type Classes = HashSet<String>;
-type Attributes = HashMap<String, String>;
-type Key = Option<Cow<'static, str>>;
+type Classes = HashSet<CowString>;
+type Attributes = HashMap<CowString, CowString>;
+type Key = Option<CowString>;
 
 #[derive(Debug, PartialEq)]
 pub struct VElement {
-    tag: Cow<'static, str>,
+    tag: CowString,
     key: Key,
     attributes: Attributes,
     classes: Classes,
@@ -40,9 +41,9 @@ impl VElement {
         &self.tag
     }
 
-    pub fn get_key(&self) -> Option<&str> {
+    pub fn get_key(&self) -> Option<&CowString> {
         match self.key {
-            Some(ref key) => Some(key),
+            Some(ref key) => Some(&key),
             None => None,
         }
     }
@@ -79,8 +80,19 @@ impl VElement {
     where
         S: Into<Cow<'static, str>>,
     {
-        self.attributes
-            .insert(name.into().into_owned(), value.into().into_owned());
+        self.attributes.insert(name.into(), value.into());
+        self
+    }
+
+    /// Parse classlist and add each class to VElement.
+    ///
+    pub fn class_list<S>(mut self, classes: S) -> Self
+    where
+        S: Into<Cow<'static, str>>,
+    {
+        for class in classes.into().split_whitespace() {
+            self.classes.insert(class.to_string().into());
+        }
         self
     }
 
@@ -90,7 +102,7 @@ impl VElement {
     where
         S: Into<Cow<'static, str>>,
     {
-        self.classes.insert(name.into().into_owned());
+        self.classes.insert(name.into());
         self
     }
 
