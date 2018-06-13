@@ -59,7 +59,6 @@
 //! )
 //!
 use std::collections::{HashMap, HashSet};
-use utils::lis::lis;
 use utils::op_queue::OpQueue;
 use vdom::element::VElement;
 use vdom::node::VNode;
@@ -198,24 +197,40 @@ fn diff_children<'new>(
             let mut op_queue = OpQueue::new();
             let mut inserts: Vec<ChildInsert> = Vec::new();
 
+            let old_children_len = old_children.len();
+            let new_children_len = new_children.len();
+
             // Find common prefix length
             let max_prefix_len = old_len.min(new_len);
             let mut prefix_len = 0;
             for i in 0..max_prefix_len {
                 // For unkeyed children this is always true
                 if old_children[i].key() == new_children[i].key() {
+                    println!("Old key: {:?}", old_children[i].key());
+                    println!("New key: {:?}", new_children[i].key());
                     prefix_len += 1;
+                } else {
+                    break;
                 }
             }
+
+            println!("Prefix len: {:?}", prefix_len);
 
             // Find common suffix length
             let max_suffix_len = max_prefix_len - prefix_len;
             let mut suffix_len = 0;
-            for i in (0..max_suffix_len).rev() {
-                if old_children[i].key() == new_children[i].key() {
+            for i in 0..max_suffix_len {
+                if old_children[old_children_len - i - 1].key()
+                    == new_children[new_children_len - i - 1].key()
+                {
                     suffix_len += 1;
+                } else {
+                    break;
                 }
             }
+
+            println!("Suffix len: {:?}", suffix_len);
+
             // Calculate middle length for both lists
             let old_middle_len = old_len - (prefix_len + suffix_len);
             let new_middle_len = new_len - (prefix_len + suffix_len);
@@ -256,6 +271,7 @@ fn diff_children<'new>(
                     diff_middles(
                         &mut op_queue,
                         &mut inserts,
+                        prefix_len,
                         old_middle_children,
                         new_middle_children,
                     );
@@ -287,12 +303,136 @@ fn diff_children<'new>(
 }
 
 // TODO: Implement middle children reconciliation
-fn diff_middles(
-    op_queue: &mut OpQueue,
-    inserts: &mut Vec<ChildInsert>,
+fn diff_middles<'new>(
+    op_queue: &mut OpQueue<'new>,
+    inserts: &mut Vec<ChildInsert<'new>>,
+    offset: usize,
     old_children: Vec<&VNode>,
-    new_children: Vec<&VNode>,
+    new_children: Vec<&'new VNode>,
 ) {
+    use self::NodeOp::*;
+
+    let mut planned_ops: Vec<NodeOp<'new>> = vec![Skip(1); old_children.len()];
+
+    // Build a map between keys and their position in new children list.
+    let mut new_children_key_index: HashMap<&CowString, usize> =
+        HashMap::with_capacity(new_children.len());
+    for (index, child) in new_children.iter().enumerate() {
+        // Children without keys should have been handled before
+        new_children_key_index.insert(child.key().unwrap(), index);
+    }
+
+    // Find positions of keys from new children list in old children list.
+    let mut old_positions: Vec<Option<usize>> = vec![None; new_children.len()];
+    let mut last_position = 0;
+    let mut moved = false;
+    let mut removed = 0;
+    for (index, child) in old_children.iter().enumerate() {
+        // Children without keys should have been handled before
+        match new_children_key_index.get(child.key().unwrap()) {
+            Some(position) => {
+                // Having last seen position bigger than current position means that
+                // some children have been moved.
+                if last_position > *position {
+                    moved = true;
+                }
+                last_position = *position;
+                old_positions[*position] = Some(index);
+            }
+            // If old key is not found in new children, old child should be removed.
+            None => {
+                removed += 1;
+                planned_ops[index] = Remove(1)
+            }
+        }
+    }
+
+    // Check if we need to Insert new children.
+    if (old_children.len() - removed) != new_children.len() {
+        for (index, child) in new_children.iter().enumerate() {
+            // If position is not found, we Insert.
+            if let None = old_positions[index] {
+                inserts.push((offset + index, child));
+            }
+        }
+    }
+    // If some chidren have moved we find largest increasing subsequence in
+    // old_positions and move children outside of it.
+    if moved {
+        let lis = positions_lis(&old_positions);
+        let mut lis_index = 0;
+
+        for (old_index, old_child) in old_children.iter().enumerate() {
+            // Find new position for current old child
+            if let Some(new_position) = new_children_key_index.get(old_child.key().unwrap()) {
+                let new_child = new_children[*new_position];
+                let diff = diff(old_child, new_child);
+                // If current old child is in LIS, don't move it
+                if lis_index < lis.len() && old_index == lis[lis_index] {
+                    planned_ops[old_index] = diff;
+                    lis_index += 1;
+                // If not, move it
+                } else {
+                    planned_ops[old_index] = match diff {
+                        Update(a, u, i) => Move(offset + *new_position, a, u, i),
+                        _ => Move(offset + *new_position, None, None, None),
+                    }
+                }
+            }
+        }
+    }
+
+    // Build the queue
+    for op in planned_ops {
+        op_queue.push(op);
+    }
+}
+
+fn positions_lis(positions: &Vec<Option<usize>>) -> Vec<usize> {
+    let n = positions.len();
+    let mut m = vec![0; n];
+    let mut p = vec![0; n];
+    let mut l = 0;
+
+    for i in 0..n {
+        let mut lo = 1;
+        let mut hi = l;
+
+        if let Some(p_i) = positions[i] {
+            while lo <= hi {
+                let mut mid = (lo + hi) / 2;
+
+                match positions[m[mid]] {
+                    Some(p_mid) => {
+                        if p_mid < p_i {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    None => {
+                        lo = mid + 1;
+                    }
+                }
+            }
+
+            let mut new_l = lo;
+            p[i] = m[new_l - 1];
+            m[new_l] = i;
+
+            if new_l > l {
+                l = new_l;
+            }
+        }
+    }
+
+    let mut o = vec![0; l];
+    let mut k = m[l];
+    for i in (0..l).rev() {
+        o[i] = positions[k].unwrap();
+        k = p[k];
+    }
+    o
 }
 
 #[cfg(test)]
@@ -609,6 +749,355 @@ mod tests {
                     Replace(&p().text("Hello").done()),
                 ]),
                 Some(vec![(2, &div().done())])
+            )
+        );
+    }
+
+    //
+    // # Comparing keyed children
+    //
+
+    #[test]
+    fn same_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(result, Skip(1));
+    }
+
+    #[test]
+    fn inserted_all_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(
+                None,
+                None,
+                Some(vec![
+                    (0, &p().key("c1").done()),
+                    (1, &p().key("c2").done()),
+                    (2, &p().key("c3").done()),
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn removed_all_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(result, Update(None, Some(vec![Remove(3)]), None));
+    }
+
+    #[test]
+    fn prepended_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(None, None, Some(vec![(0, &p().key("c1").done())]))
+        );
+    }
+
+    #[test]
+    fn inserted_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c3"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(None, None, Some(vec![(1, &p().key("c2").done())]))
+        );
+    }
+
+    #[test]
+    fn appended_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(None, None, Some(vec![(2, &p().key("c3").done())]))
+        );
+    }
+
+    #[test]
+    fn removed_middle_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .child(p().key("c4"))
+            .child(p().key("c5"))
+            .child(p().key("c6"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c4"))
+            .child(p().key("c5"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(
+                None,
+                Some(vec![Skip(1), Remove(2), Skip(2), Remove(1)]),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn replaced_middle_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .child(p().key("c4"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .child(p().key("c1"))
+            .child(div().key("d1"))
+            .child(div().key("d2"))
+            .child(p().key("c4"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(
+                None,
+                Some(vec![Skip(1), Remove(2), Skip(1)]),
+                Some(vec![
+                    (1, &div().key("d1").done()),
+                    (2, &div().key("d2").done()),
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn replaced_beginning_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .child(p().key("c4"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .child(p().key("d1"))
+            .child(div().key("d2"))
+            .child(p().key("c3"))
+            .child(p().key("c4"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(
+                None,
+                Some(vec![Remove(2), Skip(2)]),
+                Some(vec![
+                    (0, &p().key("d1").done()),
+                    (1, &div().key("d2").done()),
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn replaced_end_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .child(p().key("c4"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(div().key("d1"))
+            .child(p().key("d2"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(
+                None,
+                Some(vec![Skip(2), Remove(2)]),
+                Some(vec![
+                    (2, &div().key("d1").done()),
+                    (3, &p().key("d2").done()),
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn moved_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .child(p().key("c4"))
+            .child(p().key("c5"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .child(p().key("c2"))
+            .child(p().key("c1"))
+            .child(p().key("c3"))
+            .child(p().key("c5"))
+            .child(p().key("c4"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(
+                None,
+                Some(vec![
+                    Skip(1),
+                    Move(0, None, None, None),
+                    Skip(2),
+                    Move(3, None, None, None),
+                ]),
+                None,
+            )
+        );
+    }
+
+    #[test]
+    fn moved_and_updated_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div().key("p")
+            .child(p().key("c1"))
+            .child(p().key("c2"))
+            .child(p().key("c3"))
+            .child(p().key("c4"))
+            .child(p().key("c5"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div().key("p")
+            .child(p().key("c2").child(p()))
+            .child(p().key("c1").class("aaa"))
+            .child(p().key("c3"))
+            .child(p().key("c5"))
+            .child(p().key("c4"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(
+                None,
+                Some(vec![
+                    Update(
+                        Some(vec![AttrOp::InsertClass("aaa".to_string())]),
+                        None,
+                        None,
+                    ),
+                    Move(0, None, None, Some(vec![(0, &p().done())])),
+                    Skip(2),
+                    Move(3, None, None, None),
+                ]),
+                None,
             )
         );
     }
