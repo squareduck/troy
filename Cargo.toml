@@ -6,3 +6,8 @@ authors = ["squareduck <danvelduck@gmail.com>"]
 [dependencies]
 [dev-dependencies]
 pretty_assertions = "0.5.1"
+criterion = "0.2"
+
+[[bench]]
+name = "diff_benchmark"
+harness = false

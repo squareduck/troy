@@ -2,5 +2,5 @@
 #[macro_use]
 extern crate pretty_assertions;
 
-mod utils;
-mod vdom;
+pub mod utils;
+pub mod vdom;

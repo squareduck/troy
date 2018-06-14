@@ -25,6 +25,10 @@ impl VText {
     pub fn done(self) -> VNode {
         VNode::Text(self)
     }
+
+    pub fn get_content(&self) -> &str {
+        &self.content
+    }
 }
 
 pub fn text<S>(content: S) -> VText

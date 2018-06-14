@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use vdom::element::VElement;
 use vdom::text::VText;
 use vdom::types::CowString;

@@ -100,7 +100,7 @@ impl<'new> OpQueue<'new> {
         self.queue
     }
 
-    pub fn done_reverse(mut self) -> Vec<NodeOp<'new>> {
+    pub fn done_reverse(self) -> Vec<NodeOp<'new>> {
         let mut queue = self.done();
         queue[..].reverse();
         queue

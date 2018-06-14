@@ -206,15 +206,11 @@ fn diff_children<'new>(
             for i in 0..max_prefix_len {
                 // For unkeyed children this is always true
                 if old_children[i].key() == new_children[i].key() {
-                    println!("Old key: {:?}", old_children[i].key());
-                    println!("New key: {:?}", new_children[i].key());
                     prefix_len += 1;
                 } else {
                     break;
                 }
             }
-
-            println!("Prefix len: {:?}", prefix_len);
 
             // Find common suffix length
             let max_suffix_len = max_prefix_len - prefix_len;
@@ -228,8 +224,6 @@ fn diff_children<'new>(
                     break;
                 }
             }
-
-            println!("Suffix len: {:?}", suffix_len);
 
             // Calculate middle length for both lists
             let old_middle_len = old_len - (prefix_len + suffix_len);
@@ -290,6 +284,7 @@ fn diff_children<'new>(
             }
 
             // Extract operations and generate final results
+
             let mut ops = op_queue.remove_single_skip().done();
 
             match (ops.len(), inserts.len()) {
@@ -312,7 +307,7 @@ fn diff_middles<'new>(
 ) {
     use self::NodeOp::*;
 
-    let mut planned_ops: Vec<NodeOp<'new>> = vec![Skip(1); old_children.len()];
+    let mut planned_ops: Vec<Option<NodeOp<'new>>> = vec![None; old_children.len()];
 
     // Build a map between keys and their position in new children list.
     let mut new_children_key_index: HashMap<&CowString, usize> =
@@ -330,19 +325,21 @@ fn diff_middles<'new>(
     for (index, child) in old_children.iter().enumerate() {
         // Children without keys should have been handled before
         match new_children_key_index.get(child.key().unwrap()) {
-            Some(position) => {
+            Some(new_position) => {
                 // Having last seen position bigger than current position means that
                 // some children have been moved.
-                if last_position > *position {
+                if last_position > *new_position {
                     moved = true;
+                } else {
+                    planned_ops[index] = Some(diff(child, new_children[*new_position]));
                 }
-                last_position = *position;
-                old_positions[*position] = Some(index);
+                last_position = *new_position;
+                old_positions[*new_position] = Some(index);
             }
             // If old key is not found in new children, old child should be removed.
             None => {
                 removed += 1;
-                planned_ops[index] = Remove(1)
+                planned_ops[index] = Some(Remove(1))
             }
         }
     }
@@ -356,6 +353,7 @@ fn diff_middles<'new>(
             }
         }
     }
+
     // If some chidren have moved we find largest increasing subsequence in
     // old_positions and move children outside of it.
     if moved {
@@ -366,16 +364,21 @@ fn diff_middles<'new>(
             // Find new position for current old child
             if let Some(new_position) = new_children_key_index.get(old_child.key().unwrap()) {
                 let new_child = new_children[*new_position];
-                let diff = diff(old_child, new_child);
+                let need_diff = match planned_ops[old_index] {
+                    Some(_) => false,
+                    None => true,
+                };
                 // If current old child is in LIS, don't move it
                 if lis_index < lis.len() && old_index == lis[lis_index] {
-                    planned_ops[old_index] = diff;
+                    if need_diff {
+                        planned_ops[old_index] = Some(diff(old_child, new_child));
+                    }
                     lis_index += 1;
                 // If not, move it
                 } else {
-                    planned_ops[old_index] = match diff {
-                        Update(a, u, i) => Move(offset + *new_position, a, u, i),
-                        _ => Move(offset + *new_position, None, None, None),
+                    planned_ops[old_index] = match diff(old_child, new_child) {
+                        Update(a, u, i) => Some(Move(offset + *new_position, a, u, i)),
+                        _ => Some(Move(offset + *new_position, None, None, None)),
                     }
                 }
             }
@@ -383,8 +386,13 @@ fn diff_middles<'new>(
     }
 
     // Build the queue
-    for op in planned_ops {
-        op_queue.push(op);
+    for (index, op) in planned_ops.into_iter().enumerate() {
+        match op {
+            Some(op) => op_queue.push(op),
+            None => {
+                op_queue.push(Skip(1));
+            }
+        }
     }
 }
 
@@ -1098,6 +1106,37 @@ mod tests {
                     Move(3, None, None, None),
                 ]),
                 None,
+            )
+        );
+    }
+
+    #[test]
+    fn added_around_keyed_children() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let old = div()
+            .child(p().key("1").text("initial"))
+            .done();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        let new = div()
+            .child(div().key("2").text("prefix"))
+            .child(p().key("1").text("updated"))
+            .child(div().key("3").text("postfix"))
+            .done();
+
+        let result = diff(&old, &new);
+
+        assert_eq!(
+            result,
+            Update(
+                None,
+                Some(vec![
+                    Update(None, Some(vec![Replace(&text("updated").done())]), None),
+                ]),
+                Some(vec![
+                    (0, &div().key("2").text("prefix").done()),
+                    (2, &div().key("3").text("postfix").done()),
+                ])
             )
         );
     }
