@@ -1,4 +1,4 @@
-use vdom::diff::NodeOp;
+use diff::NodeOp;
 
 /// NodeOp Queue with size optimizations.
 ///
@@ -31,7 +31,7 @@ impl<'new> OpQueue<'new> {
     }
 
     pub fn push(&mut self, op: NodeOp<'new>) {
-        use vdom::diff::NodeOp::*;
+        use diff::NodeOp::*;
 
         match (self.last.clone(), op) {
             // When LastOp is None
@@ -85,7 +85,7 @@ impl<'new> OpQueue<'new> {
     }
 
     pub fn done(mut self) -> Vec<NodeOp<'new>> {
-        use vdom::diff::NodeOp::*;
+        use diff::NodeOp::*;
 
         match self.last {
             LastOp::Skip(last_count) => {
@@ -99,19 +99,13 @@ impl<'new> OpQueue<'new> {
 
         self.queue
     }
-
-    pub fn done_reverse(self) -> Vec<NodeOp<'new>> {
-        let mut queue = self.done();
-        queue[..].reverse();
-        queue
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vdom::diff::NodeOp::*;
-    use vdom::element::div;
+    use diff::NodeOp::*;
+    use element::div;
 
     #[test]
     fn adding_skips() {

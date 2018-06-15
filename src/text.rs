@@ -1,5 +1,5 @@
+use node::VNode;
 use std::borrow::Cow;
-use vdom::node::VNode;
 
 type CowString = Cow<'static, str>;
 

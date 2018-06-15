@@ -1,8 +1,8 @@
+use node::VNode;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use vdom::node::VNode;
-use vdom::text::VText;
-use vdom::types::CowString;
+use text::VText;
+use types::CowString;
 
 type Classes = HashSet<CowString>;
 type Attributes = HashMap<CowString, CowString>;

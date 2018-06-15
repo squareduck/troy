@@ -58,11 +58,11 @@
 //!     ])
 //! )
 //!
+use element::VElement;
+use node::VNode;
+use op_queue::OpQueue;
 use std::collections::{HashMap, HashSet};
-use utils::op_queue::OpQueue;
-use vdom::element::VElement;
-use vdom::node::VNode;
-use vdom::types::CowString;
+use types::CowString;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum AttrOp {
@@ -89,7 +89,7 @@ pub enum NodeOp<'new> {
 
 pub fn diff<'new>(old: &VNode, new: &'new VNode) -> NodeOp<'new> {
     use self::NodeOp::*;
-    use vdom::node::VNode::*;
+    use node::VNode::*;
 
     match (old, new) {
         (Element(old_element), Element(new_element)) => {
@@ -386,7 +386,7 @@ fn diff_middles<'new>(
     }
 
     // Build the queue
-    for (index, op) in planned_ops.into_iter().enumerate() {
+    for op in planned_ops.into_iter() {
         match op {
             Some(op) => op_queue.push(op),
             None => {
@@ -447,8 +447,8 @@ fn positions_lis(positions: &Vec<Option<usize>>) -> Vec<usize> {
 mod tests {
     use super::NodeOp::*;
     use super::*;
-    use vdom::element::{div, p};
-    use vdom::text::text;
+    use element::{div, p};
+    use text::text;
 
     //
     // # Comparing types and tags

@@ -1,6 +1,6 @@
-use vdom::element::VElement;
-use vdom::text::VText;
-use vdom::types::CowString;
+use element::VElement;
+use text::VText;
+use types::CowString;
 
 #[derive(Debug, PartialEq)]
 pub enum VNode {
