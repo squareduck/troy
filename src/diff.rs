@@ -447,7 +447,7 @@ fn positions_lis(positions: &Vec<Option<usize>>) -> Vec<usize> {
 mod tests {
     use super::NodeOp::*;
     use super::*;
-    use element::{div, p};
+    use tags::*;
     use text::text;
 
     //

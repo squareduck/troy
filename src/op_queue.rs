@@ -105,7 +105,7 @@ impl<'new> OpQueue<'new> {
 mod tests {
     use super::*;
     use diff::NodeOp::*;
-    use element::div;
+    use tags::div;
 
     #[test]
     fn adding_skips() {

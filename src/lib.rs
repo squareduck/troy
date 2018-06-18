@@ -6,5 +6,6 @@ pub mod diff;
 pub mod element;
 pub mod node;
 mod op_queue;
+pub mod tags;
 pub mod text;
 mod types;

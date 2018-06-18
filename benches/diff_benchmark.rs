@@ -2,8 +2,8 @@
 extern crate criterion;
 extern crate troy;
 
-use troy::vdom::diff::diff;
-use troy::vdom::element::{div, p};
+use troy::diff::diff;
+use troy::tags::*;
 
 use criterion::Criterion;
 

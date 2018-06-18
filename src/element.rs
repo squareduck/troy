@@ -129,15 +129,3 @@ impl VElement {
         VNode::Element(self)
     }
 }
-
-//
-// # Common HTML elements
-//
-
-pub fn div() -> VElement {
-    VElement::new("div")
-}
-
-pub fn p() -> VElement {
-    VElement::new("p")
-}
