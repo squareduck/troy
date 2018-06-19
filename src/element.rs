@@ -1,5 +1,4 @@
 use node::VNode;
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use text::VText;
 use types::CowString;
@@ -11,6 +10,7 @@ type Key = Option<CowString>;
 #[derive(Debug, PartialEq)]
 pub struct VElement {
     tag: CowString,
+    void: bool,
     key: Key,
     attributes: Attributes,
     classes: Classes,
@@ -22,10 +22,28 @@ impl VElement {
     ///
     pub fn new<S>(tag: S) -> Self
     where
-        S: Into<Cow<'static, str>>,
+        S: Into<CowString>,
     {
         VElement {
             tag: tag.into(),
+            void: false,
+            key: None,
+            attributes: Attributes::new(),
+            classes: Classes::new(),
+            children: Vec::new(),
+        }
+    }
+
+    /// Create a new void VElement with specified tag.
+    /// Void elements don't have a closing tag and can't have children.
+    ///
+    pub fn new_void<S>(tag: S) -> Self
+    where
+        S: Into<CowString>,
+    {
+        VElement {
+            tag: tag.into(),
+            void: true,
             key: None,
             attributes: Attributes::new(),
             classes: Classes::new(),
@@ -39,6 +57,10 @@ impl VElement {
 
     pub fn get_tag(&self) -> &str {
         &self.tag
+    }
+
+    pub fn is_void(&self) -> bool {
+        self.void
     }
 
     pub fn get_key(&self) -> Option<&CowString> {
@@ -68,7 +90,7 @@ impl VElement {
     ///
     pub fn key<S>(mut self, key: S) -> Self
     where
-        S: Into<Cow<'static, str>>,
+        S: Into<CowString>,
     {
         self.key = Some(key.into());
         self
@@ -78,7 +100,7 @@ impl VElement {
     ///
     pub fn attr<S>(mut self, name: S, value: S) -> Self
     where
-        S: Into<Cow<'static, str>>,
+        S: Into<CowString>,
     {
         self.attributes.insert(name.into(), value.into());
         self
@@ -88,7 +110,7 @@ impl VElement {
     ///
     pub fn class_list<S>(mut self, classes: S) -> Self
     where
-        S: Into<Cow<'static, str>>,
+        S: Into<CowString>,
     {
         for class in classes.into().split_whitespace() {
             self.classes.insert(class.to_string().into());
@@ -100,7 +122,7 @@ impl VElement {
     ///
     pub fn class<S>(mut self, name: S) -> Self
     where
-        S: Into<Cow<'static, str>>,
+        S: Into<CowString>,
     {
         self.classes.insert(name.into());
         self
@@ -117,7 +139,7 @@ impl VElement {
     ///
     pub fn text<S>(mut self, text: S) -> Self
     where
-        S: Into<Cow<'static, str>>,
+        S: Into<CowString>,
     {
         self.children.push(VNode::Text(VText::new(text.into())));
         self

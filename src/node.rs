@@ -59,25 +59,31 @@ impl fmt::Display for VNode {
                         }
                     }
 
-                    // End opening tag
-                    write!(f, ">")?;
+                    // Void elements do not have cloning tag or children.
+                    if element.is_void() {
+                        write!(f, ">\n")
+                    } else {
+                        // End opening tag
+                        write!(f, ">")?;
 
-                    if element.get_children().len() > 0 {
-                        write!(f, "\n")?;
+                        // Children
+
+                        if element.get_children().len() > 0 {
+                            write!(f, "\n")?;
+                        }
+
+                        for child in element.get_children() {
+                            fmt_indent(indent_level + 1, child, f)?;
+                        }
+
+                        // Closing tag
+                        write!(
+                            f,
+                            "{}</{}>\n",
+                            indent_string.repeat(indent_level),
+                            element.get_tag()
+                        )
                     }
-
-                    // Children
-                    for child in element.get_children() {
-                        fmt_indent(indent_level + 1, child, f)?;
-                    }
-
-                    // Closing tag
-                    write!(
-                        f,
-                        "{}</{}>\n",
-                        indent_string.repeat(indent_level),
-                        element.get_tag()
-                    )
                 }
                 VNode::Text(text) => write!(
                     f,
@@ -102,6 +108,7 @@ mod tests {
         let node = div().class_list("aaa bbb").attr("id", "ccc").attr("hidden", "")
             .child(p().class("one").text("1"))
             .child(p().class("two").text("2"))
+            .child(hr())
             .child(p().class("three").text("3"))
             .done();
 
@@ -115,6 +122,7 @@ mod tests {
     <p class="two">
         2
     </p>
+    <hr>
     <p class="three">
         3
     </p>
